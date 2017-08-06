@@ -29,7 +29,7 @@ OFMethod::usage=
 	"A method wrapper for a function and a property association";
 
 
-OFNew::usage="Makes a new object instance";
+OFNewObject::usage="Makes a new object instance";
 OFSelect::usage="Gets parts of the object table by key pattern";
 OFCount::usage="Returns the number of objects matching a pattern";
 OFClear::usage="Clears objects matching a pattern";
@@ -43,6 +43,8 @@ OFTypeClear::usage="Clears types matching a pattern";
 
 OFStrings::usage=
 	"Takes a list of strings and OFObjects and gets the object keys";
+OFKey::usage=
+	"Extracts the key name from an OFObject";
 OFRecursiveLookup::usage=
 	"The recursive lookup function that scans up an object heiarchy for a property";
 $OFPrepMethods::usage=
@@ -57,22 +59,26 @@ OFLookup::usage=
 	"Looks up object properties or definitions";
 
 
-$OFMutateGroup::usage=
-	"Mutation equivalent of $OFLookupGroup";
+$OFApplicationGroup::usage=
+	"Application equivalent of $OFLookupGroup";
 
 
+OFApply::usage=
+	"Applies a function to an object";
 OFMutate::usage=
-	"Applies a function to an object either by entire array or by keys";
+	"Applies a function to an object and sets the result";
 OFSet::usage=
 	"Sets an object key value";
 OFSetDelayed::usage=
-	"Sets an object key value with RuleDelayed";
+	"Sets an object key value with SetDelayed";
+OFSetThread::usage=
+	"Threads Set over object keys and values";
+OFSetThreadDelayed::usage=
+	"Threads SetDelayed over object keys and values";
 OFSetPart::usage=
 	"Uses set on a part of an object key";
-OFSetDelayed::usage=
+OFSetPartDelayed::usage=
 	"Uses SetDelayed on a part of an object key";
-OFSetIndex::usage=
-	"Sets an index part of an object key";
 OFUnset::usage=
 	"Uses unset on an object key or keys";
 OFAdjust::usage=
@@ -139,53 +145,72 @@ If[!MatchQ[$OFObjectTable,_Association],
 	];
 
 
-OFNew[objs:{__Association}]:=
-	With[{
+OFNewObject//Clear
+
+
+OFNewObject::types="Types `` are not all Strings";
+OFNewObject::uuids="UUIDs `` are not all Strings";
+
+
+Options[OFNewObject]=
+	{
+		"Initialize"->True,
+		"UUIDMethod"->(CreateUUID[#<>"-"]&)
+		};
+OFNewObject[objs:{__Association},ops:OptionsPattern[]]:=
+	Catch@
+	Module[{
 		types=Lookup[objs,"ObjectType","Object"],
-		args=Lookup[objs,"ObjectInitializationArguments",{}]
+		args=Lookup[objs,"ObjectInitializationArguments",{}],
+		uuids,
+		objlist
 		},
-		With[{uuids=CreateUUID[#<>"-"]&/@types},
-			AssociateTo[$OFObjectTable["Objects"],
-				MapThread[
-					#3->
-						Join[
-							KeyDrop[#,"ObjectInitializationArguments"],
-							<|
-								"ObjectType"->#2
-								|>
-							]&,
-					{
-						objs,
-						types,
-						uuids
-						}]
+		If[!AllTrue[types,StringQ],Message[OFNewObject::types,types];Throw[$Failed]];
+		uuids=
+			MapIndexed[
+				OptionValue["UUIDMethod"],
+				types
 				];
+		If[!AllTrue[uuids,StringQ],Message[OFNewObject::uuids,uuids];Throw[$Failed]];
+		objlist=OFObject/@uuids;
+		AssociateTo[$OFObjectTable["Objects"],
 			MapThread[
-				With[{f=#2,o=#},
-					Function[Null,f[o,##],HoldComplete]@@#3
-					]&,
+				#3->
+					Join[
+						#,
+						<|
+							"ObjectType"->#2,
+							"ObjectID"->#3
+							|>
+						]&,
 				{
-					OFObject/@uuids,
-					Lookup[
-						Lookup[$OFObjectTable["Types"],types,<||>],
-						"ObjectInitialization",
-						Identity
-						],
+					KeyDrop[objs,"ObjectInitializationArguments"],
+					types,
+					uuids
+					}]
+			];
+		If[OptionValue["Initialize"],
+			MapThread[
+				Function[#@@#2],
+				{
+					OFLookup[objlist,"ObjectInitialization",Identity],
 					args
-					}];
-		OFObject/@uuids
-		]
+					}]
+			];
+		objlist
 	];
-OFNew[a:{(_String->_Association|_String)..}]:=
-	OFNew@
+OFNewObject[a:{((_String->_Association)|_String)..},ops:OptionsPattern[]]:=
+	OFNewObject[
 		Map[
 			If[Length[#]==2,
 				Append[#[[2]],"ObjectType"->#[[1]]],
 				<|"ObjectType"->#|>
 				]&,
-			a];
-OFNew[a:_Association|_String|(_String->_Association)]:=
-	First@OFNew[{a}];
+			a],
+		ops
+		];
+OFNewObject[a:_Association|_String|(_String->_Association),ops:OptionsPattern[]]:=
+	First@OFNewObject[{a},ops];
 
 
 OFSelect[pattern_:_]:=
@@ -196,6 +221,11 @@ OFCount[pattern_:_]:=
 	Length@OFSelect[pattern]
 
 
+OFClear//Clear
+
+
+OFClear[Optional[Verbatim[_],_]]:=
+	$OFObjectTable["Objects"]=<||>;
 OFClear[pattern_:_]:=
 	With[{deleted=OFSelect[pattern]},
 		$OFObjectTable["Objects"]=
@@ -204,14 +234,129 @@ OFClear[pattern_:_]:=
 		];
 
 
+OFObjectQ//Clear
+
+
+OFObjectQ[types_List]:=
+	OFObjectQ/@types;
+OFObjectQ[OFObject[type_]]:=
+	KeyMemberQ[$OFObjectTable["Objects"],type];
+OFObjectQ[type_]:=
+	KeyMemberQ[$OFObjectTable["Objects"],type];
+
+
+OFTypeChain[type_String?OFTypeQ]:=
+	FixedPointList[
+		Lookup[
+			Lookup[$OFObjectTable["Types"],#,<||>],
+			"ObjectType",
+			#
+			]&,
+		type
+		];
+OFTypeChain[type_?OFTypeQ]:=
+	OFTypeChain[First@type]
+OFTypeChain[obj_?OFObjectQ]:=
+	OFTypeChain@OFLookup[obj,"ObjectType"];
+
+
+OFObject//Clear
+
+
+eOFObjectConstructor[obj_]:=
+	!TrueQ[$eOFObjectConstructor]&&System`Private`EntryQ[Unevaluated@obj];
+eOFObjectConstructor~SetAttributes~HoldAllComplete;
+
+
 OFObject[OFObject[k_]]:=
 	OFObject[k];
 
 
-OFNewType[name_,a_Association]:=
-	$OFObjectTable["Types",name]=a;
-OFNewType[name_]:=
-	$OFObjectTable["Types",name]=<||>;
+obj:OFObject[k_]?eOFObjectConstructor:=
+	Block[{$eOFObjectConstructor=True},
+		System`Private`SetNoEntry[obj]
+		]
+
+
+OFObject/:OFObject[k_][[bits___]]:=
+	With[{
+		res=
+			Check[
+				Fold[
+					If[!ListQ[#]&&OFObjectQ[#]//TrueQ,
+						If[IntegerQ[#2],
+							OFLookup[#][[#2]],
+							OFLookup[#,#2]
+							],
+						#[[#2]]
+						]&,
+					OFObject[k],
+					{bits}
+					],
+				$OFObjectLookupFailure,
+				{
+					Part::partd,General::partd,
+					Part::pspec1,General::pspec1
+					}
+				]
+		},
+		res/;res=!=$OFObjectLookupFailure
+		];
+OFObject[k_][bits__]:=
+	With[{
+		res=
+			Catch[
+				Fold[
+					If[Head[#]===OFObject,
+						OFLookup[#,#2],
+						Replace[#[#2],Unevaluated[#[#2]]:>
+							(
+								Message[OFObject::pspec1,#2];
+								Throw[$OFObjectLookupFailure]
+								)
+							]
+						]&,
+					OFObject[k],
+					{bits}
+					]
+				]
+		},
+		res/;res=!=$OFObjectLookupFailure&&Head[res]=!=OFLookup
+		];
+
+
+OFTypeQ[types_List]:=
+	OFTypeQ/@types;
+OFTypeQ[OFType[type_]]:=
+	KeyMemberQ[$OFObjectTable["Types"],type];
+OFTypeQ[type_]:=
+	KeyMemberQ[$OFObjectTable["Types"],type];
+
+
+OFNewType::names="Type names `` are not all Strings";
+
+
+OFNewType[a:{__Association}]:=
+	Catch@
+	With[{
+		names=
+			Lookup[
+				a,
+				"ObjectTypeName"
+				]
+		},
+		If[!AllTrue[names,StringQ],Message[OFNewType::names,names];Throw@$Failed];
+		AssociateTo[
+			$OFObjectTable["Types"],
+			Thread[names->a]
+			]
+		];
+OFNewType[a_Association]:=
+	First@OFNewType[{a}];
+OFNewType[name_String,a:_Association:<||>]:=
+	OFNewType[
+		Append[a,"ObjectTypeName"->name];
+		]
 
 
 OFTypeSelect[pattern_:_]:=
@@ -230,37 +375,161 @@ OFTypeClear[pattern_:_]:=
 		];
 
 
-OFType[t_][a___]:=
-	OFNew[t,a];
+OFType//Clear
+
+
+OFType[type_][args___]:=
+	OFNewObject[
+		<|
+			"ObjectType"->type,
+			"ObjectInitializationArguments"->{args}
+			|>
+		]
+
+
+OFNewObject[types:{(Rule|RuleDelayed)[_OFType,_]..}]:=
+	OFNewObject[
+		<|
+			"ObjectType"->
+				#[[1,1]],
+			"ObjectInitializationArguments"->
+				Extract[
+					#,
+					2,
+					Function[Null,
+						Replace[HoldComplete[#],HoldComplete[_[a___]]:>HoldComplete[a]],
+						HoldAllComplete
+						]
+					]
+			|>&/@types
+		];
+OFNewObject[types:{(Rule|RuleDelayed)[_OFType,_]|_OFType..}]:=
+	OFNewObject[
+		Replace[types,t_OFType:>(OFType->{}),1]
+		];
+OFNewObject[type:(Rule|RuleDelayed)[_OFType,_]|_OFType]:=
+	First@OFNewObject[{type}]
 
 
 objectPattern=_String|_OFObject|{__String}|{__OFObject};
 
 
+OFKey[(OFObject|OFType)[k_]]:=
+	k;
+
+
 OFStrings[k:objectPattern]:=
-	Map[If[StringQ@#,#,First@#]&,Flatten[{k},1]];
+	Map[If[StringQ@#,#,OFKey@#]&,Flatten[{k},1]];
 
 
 OFStrings[{}]={};
 
 
-OFRecursiveLookup[a_Association,
-	key:Except[_List|_Association],
-	default_:Missing["KeyAbsent"]]:=
+OFrecursiveLookupStep~SetAttributes~HoldRest
+
+
+OFrecursiveLookupStep[
+	objs_,
+	types_,
+	keys_,
+	default_,
+	missing_,
+	typeroot_
+	]:=
+	Module[{
+		props=Lookup[objs,keys,missing],
+		missingpos,
+		objnew,
+		typenew
+		},
+		missingpos=First/@Position[props,missing,{1}];
+		objnew=DeleteCases[types[[missingpos]],typeroot];
+		If[Length@objnew==0,
+			props,
+			typenew=
+				Lookup[
+					$OFObjectTable["Types"],
+					Lookup[objnew,"ObjectType","Object"],
+					typeroot
+					];
+			ReplacePart[props,
+				Thread[
+					missingpos->
+						OFrecursiveLookupStep[objnew,typenew,keys,default,missing,typeroot]
+					]
+				]
+			]
+		];
+
+
+OFRecursiveLookup//Clear
+
+
+OFRecursiveLookup~SetAttributes~HoldRest;
+
+
+OFRecursiveLookup[
+	objs:{__Association},
+	keys_,
+	default_:$OFMissingKeyAbsent
+	]:=
+	Module[{
+		missingKey=Unique[$OFMissingKeyAbsent],
+		types=
+			Lookup[objs,"ObjectType","Object"],
+		typeroot=Lookup[$OFObjectTable["Types"],"Object",<||>]
+		},
+		types=
+			Lookup[$OFObjectTable["Types"],types,typeroot];
+		If[default===$OFMissingKeyAbsent,
+			Map[
+				If[ListQ@keys,
+					MapThread[
+						If[#===missingKey,
+							Missing["KeyAbsent",#2],
+							#
+							]&,
+						{
+							#,
+							keys
+							}
+						],
+					If[#===missingKey,
+						Missing["KeyAbsent",keys],
+						#
+						]
+					]&
+				],
+			Identity
+			]@
+			Replace[
+				OFrecursiveLookupStep[objs,types,keys,default,missingKey,typeroot],
+				missingKey->default,
+				{2}
+				]
+		];
+
+
+OFRecursiveLookup[
+	a_Association,
+	key:Except[_List],
+	default_:$OFMissingKeyAbsent
+	]:=
 	Lookup[a,key,
 		With[{type=Lookup[a,"ObjectType"]},
 			If[KeyMemberQ[$OFObjectTable["Types"],type],
 				OFRecursiveLookup[$OFObjectTable["Types",type],key,default],
-				If[default===Missing["KeyAbsent"],
+				If[default===$OFMissingKeyAbsent,
 					Missing["KeyAbsent",key],
 					default
 					]
 				]
 			]
 		];
-OFRecursiveLookup[a_Association,
-	keys:_List|_Association,
-	default_:Missing["KeyAbsent"]]:=
+OFRecursiveLookup[
+	a_Association,
+	keys:_List,
+	default_:$OFMissingKeyAbsent]:=
 	OFRecursiveLookup[a,#,default]&/@keys;
 OFRecursiveLookup[m_Missing,__]:=
 	m;
@@ -286,17 +555,9 @@ OFPrepMethod[OFMethod[f_,a_Association],id_String]:=
 			Function[Null,f[obj,##],atts]
 			]
 		];
-OFPrepMethod[OFMethod[f_Symbol],id_String]:=
-	With[{obj=OFObject@id,attrs=Attributes[f]},
-		Function[f[obj,##],attrs]
-		];
-OFPrepMethod[OFMethod[f:HoldPattern[Function[_]|Function[_,_]]],id_String]:=
-	With[{obj=id},
-		Function[f[obj,##]]
-		];
-OFPrepMethod[OFMethod[f:HoldPattern[Function[_,_,a_]]],id_String]:=
+OFPrepMethod[OFMethod[f_],id_String]:=
 	With[{obj=OFObject@id},
-		Function[Null,f[obj,##],a]
+		Function[Null,f[obj,##],HoldAllComplete]
 		];
 
 
@@ -314,155 +575,223 @@ OFPostLookup[e:Except[_OFMethod|_List],id_]:=
 $OFLookupGroup="Objects";
 
 
+OFLookup~SetAttributes~HoldRest;
+
+
 OFLookup[k_String|OFObject[k_String]]:=
 	Lookup[$OFObjectTable[$OFLookupGroup],k];
 OFLookup[k:{__String}]:=
 	Lookup[$OFObjectTable[$OFLookupGroup],k];
 OFLookup[k:{__OFObject}]:=
-	Lookup[$OFObjectTable[$OFLookupGroup],First/@k];
+	Lookup[$OFObjectTable[$OFLookupGroup],OFKey/@k];
 
 
 OFLookup[k_String,s_,default_:Missing["KeyAbsent"]]:=
 	OFPostLookup[
 		OFRecursiveLookup[Lookup[$OFObjectTable[$OFLookupGroup],k],s,default],
 		k];
-OFLookup[OFObject[k_String],s_,default_:Missing["KeyAbsent"]]:=
+OFLookup[OFObject[k_String],s_,default_:$OFMissingKeyAbsent]:=
 	Block[{$OFLookupGroup="Objects"},
 		OFLookup[k,s,default]
 		];
-OFLookup[OFType[k_String],s_,default_:Missing["KeyAbsent"]]:=
+OFLookup[OFType[k_String],s_,default_:$OFMissingKeyAbsent]:=
 	Block[{$OFLookupGroup="Types"},
 		OFLookup[k,s,default]
 		];
 OFLookup[
 	keys:{__String},p_,
-	default_:Missing["KeyAbsent"]]:=
+	default_:$OFMissingKeyAbsent]:=
 	MapThread[
-		OFPostLookup[
-			OFRecursiveLookup[#2,p,default],
-			#]&,
+		OFPostLookup,
 		{
-			keys,
-			Lookup[$OFObjectTable[$OFLookupGroup],keys]
+			OFRecursiveLookup[
+				Lookup[$OFObjectTable[$OFLookupGroup],keys,default],
+				p,
+				default
+				],
+			keys
 			}
 		];
-OFLookup[keys:{__OFObject},p_,default_:Missing["KeyAbsent"]]:=
+OFLookup[keys:{__OFObject},p_,default_:$OFMissingKeyAbsent]:=
 	Block[{$OFLookupGroup="Objects"},
-		OFLookup[First/@keys,p,default]
+		OFLookup[OFKey/@keys,p,default]
 		];
-OFLookup[keys:{__OFType},p_,default_:Missing["KeyAbsent"]]:=
+OFLookup[keys:{__OFType},p_,default_:$OFMissingKeyAbsent]:=
 	Block[{$OFLookupGroup="Types"},
-		OFLookup[First/@keys,p,default]
+		OFLookup[OFKey/@keys,p,default]
 		];
 
 
-$OFMutateGroup=
+$OFApplicationGroup=
 	"Objects";
 
 
-OFMutate[k_String,f_]:=
-	If[KeyMemberQ[$OFObjectTable[$OFMutateGroup],k],
-		$OFObjectTable[$OFMutateGroup,k]=
-			f@$OFObjectTable[$OFMutateGroup,k],
-		Missing["KeyAbsent",k]
-		];
-OFMutate[k_String,p_,f_]:=
-	If[KeyMemberQ[$OFObjectTable[$OFMutateGroup],k],
-		f[OFLookup[k,p],k],
-		Missing["KeyAbsent",k]
-		];
-OFMutate[OFObject[k_String],f_]:=
-	Block[{$OFMutateGroup="Objects"},
-		OFMutate[k,f]
-		];
-OFMutation[OFObject[k_String],f_,p_]:=
-	Block[{$OFMutateGroup="Objects"},
-		OFMutate[k,f,p]
-		];
-OFMutate[OFType[k_String],f_]:=
-	Block[{$OFMutateGroup="Types"},
-		OFMutate[k,f]
-		];
-OFMutation[OFType[k_String],f_,p_]:=
-	Block[{$OFMutateGroup="Types"},
-		OFMutate[k,f,p]
-		];
+OFApply//Clear
 
 
-OFMutate[k:{__String},f_]:=
-	If[KeyMemberQ[$OFObjectTable[$OFMutateGroup],#],
-		$OFObjectTable[$OFMutateGroup,#]=
-			f[$OFObjectTable[$OFMutateGroup,#]];
-		OFObject[#],
-		Missing["KeyAbsent",#]
-		]&/@k;
-OFMutate[k:{__String},p_,f_]:=
-	With[{l=
-		If[KeyMemberQ[$OFObjectTable[$OFMutateGroup],#],
-			f[OFLookup[#,p],#];
-			OFObject[#],
+OFApply[k:{__String},f_]:=
+	With[{$OFApplicationGroup=$OFApplicationGroup},
+		If[KeyMemberQ[$OFObjectTable[$OFApplicationGroup],#],
+			f[
+				$OFObjectTable[$OFApplicationGroup,#],
+				HoldPattern[$OFObjectTable[$OFApplicationGroup,#]]
+				],
 			Missing["KeyAbsent",#]
 			]&/@k
-		},
-		If[Length@l==1,
-			First@l,
-			l
+		];
+OFApply[k:{__String},p_,f_]:=
+	With[{$OFApplicationGroup=$OFApplicationGroup},
+		If[KeyMemberQ[$OFObjectTable[$OFApplicationGroup],#],
+			f[
+				OFLookup[#,p],
+				HoldPattern[$OFObjectTable[$OFApplicationGroup,#,p]]
+				],
+			Missing["KeyAbsent",#]
+			]&/@k
+		];
+OFApply[k_String,f_]:=
+	First@OFApply[{k},f]
+OFApply[k_String,p_,f_]:=
+	First@OFApply[{k},p,f]
+
+
+OFApply[k:{__OFObject},f_]:=
+	Block[{$OFApplicationGroup="Objects"},
+		OFApply[OFKey/@k,f]
+		];
+OFApply[k:{__OFObject},p_,f_]:=
+	Block[{$OFApplicationGroup="Objects"},
+		OFApply[OFKey/@k,p,f]
+		];
+OFApply[k_OFObject,f_]:=
+	First@OFApply[{k},f]
+OFApply[k_OFObject,p_,f_]:=
+	First@OFApply[{k},p,f]
+
+
+OFApply[k:{__OFType},f_]:=
+	Block[{$OFApplicationGroup="Types"},
+		OFApply[OFKey/@k,f]
+		];
+OFApply[k:{__OFType},p_,f_]:=
+	Block[{$OFApplicationGroup="Types"},
+		OFApply[OFKey/@k,p,f]
+		];
+OFApply[k_OFType,f_]:=
+	First@OFApply[{k},f]
+OFApply[k_OFType,p_,f_]:=
+	First@OFApply[{k},p,f]
+
+
+OFApply[k:{(_OFObject|_OFType)..},f_]:=
+	k/.
+		Join[
+			AssociationThread[#,OFApply[#,f]]&@Cases[k,_OFObject],
+			AssociationThread[#,OFApply[#,f]]&@Cases[k,_OFType]
+			]
+
+
+OFMutate[obj:objectPattern,f_]:=
+	OFApply[
+		obj,
+		Function[Null,Set[#2,f[#]],HoldAllComplete]
+		];
+OFMutate[obj:objectPattern,p_,f_]:=
+	OFApply[
+		obj,
+		p,
+		Function[Null,Set[#2,f[#]],HoldAllComplete]
+		]
+
+
+OFSet[k:objectPattern,p:Except[_List],v_]:=
+	OFApply[k,p,
+		Function[Null,
+			With[{sym=Extract[#2,1,Unevaluated]},
+				Set[sym,v]
+				],
+			HoldFirst
 			]
 		];
-OFMutate[k:{__OFObject},f_]:=
-	Block[{$OFMutateGroup="Objects"},
-		OFMutate[First/@k,f]
-		];
-OFMutate[k:{__OFObject},p_,f_]:=
-	Block[{$OFMutateGroup="Objects"},
-		OFMutate[First/@k,p,f]
-		];
-OFMutate[k:{__OFType},f_]:=
-	Block[{$OFMutateGroup="Types"},
-		OFMutate[First/@k,f]
-		];
-OFMutate[k:{__OFType},p_,f_]:=
-	Block[{$OFMutateGroup="Types"},
-		OFMutate[First/@k,p,f]
-		];
-
-
-OFSet[k:objectPattern,p_,v_]:=
-	OFMutate[k,p,
-		Function[Null,Set[#,v],HoldFirst]];
 
 
 OFSetDelayed[k:objectPattern,p_,v_]:=
-	OFMutate[k,p,Function[Null,SetDelayed[#,v],HoldFirst]];
+	OFApply[k,p,
+		Function[Null,
+			With[{sym=Extract[#2,1,Unevaluated]},
+				SetDelayed[sym,v]
+				],
+			HoldAllComplete
+			]
+		];
+OFSetDelayed~SetAttributes~HoldAllComplete
+
+
+OFSetThread[k:objectPattern,p_,v_]:=
+	With[{base=Thread[p->v]},
+		OFApply[k,
+			Function[Null,
+				With[{sym=Extract[#2,1,Unevaluated]},
+					AssociateTo[sym,base]
+					],
+				HoldAllComplete
+				]
+			];
+		v
+		];
+
+
+OFSetThreadDelayed[k:objectPattern,p_,v_]:=
+	With[{base=Thread[p:>v]},
+		OFApply[k,
+			Function[Null,
+				With[{sym=Extract[#2,1,Unevaluated]},
+					AssociateTo[sym,base]
+					],
+				HoldAllComplete
+				]
+			];
+		];
+OFSetThreadDelayed~SetAttributes~HoldAllComplete
 
 
 OFSetPart[k:objectPattern,key_,parts__,value_]:=
-	Block[{ofObCachedPart=OFLookup[k,key]},
-		ofObCachedPart[parts]=value;
-		OFSet[k,key,ofObCachedPart]
-		];
+	OFApply[k,key,
+		Function[
+			Null,
+			Replace[#2,
+				Verbatim[HoldPattern][
+					HoldPattern[$OFObjectTable[p__]]
+					]:>
+					Set[$OFObjectTable[[p,parts]],value]
+				],
+			HoldAllComplete
+			]
+		]
 
 
 OFSetPartDelayed[k:objectPattern,key_,parts__,value_]:=
-	Block[{ofObCachedPart=OFLookup[k,key]},
-		ofObCachedPart[parts]:=value;
-		OFSet[k,key,ofObCachedPart]
+	OFApply[k,key,
+		Function[
+			Null,
+			Replace[#2,
+				Verbatim[HoldPattern][
+					HoldPattern[$OFObjectTable[p__]]
+					]:>
+					SetDelayed[$OFObjectTable[[p,parts]],value]
+				],
+			HoldAllComplete
+			]
 		];
-
-
-OFSetIndex[k:objectPattern,key_,inds__,value_]:=
-	Block[{ofObCachedPart=OFLookup[k,key]},
-		ofObCachedPart[[inds]]=value;
-		OFSet[k,key,ofObCachedPart]
-		];
+OFSetPartDelayed~SetAttributes~HoldAllComplete
 
 
 OFUnset[k:objectPattern,p_]:=
-	OFMutate[k,p,Function[Null,Unset@#,HoldFirst]];
+	OFApply[k,p,Function[Null,Unset@#,HoldFirst]];
 
 
 OFAdjust[k:objectPattern,p_,v_,function_:Plus]:=
-	OFMutate[k,p,($OFObjectTable[$OFMutateGroup,#2,p]=function[v,#])&]
+	OFMutate[k,p,($OFObjectTable[$OFApplicationGroup,#2,p]=function[v,#])&]
 
 
 OFAddTo[k:objectPattern,p_,v_]:=
@@ -563,7 +892,7 @@ OFReferencedMethods[k:objectPattern]:=
 OFCopy[k:objectPattern]:=
 	Replace[OFLookup[OFStrings[k]],{
 		a_Association:>
-			OFNew[a]
+			OFNewObject[a]
 		},
 		1]
 
@@ -572,9 +901,9 @@ OFRecursiveCopy[k:objectPattern]:=
 	With[{totalRefs=
 		DeleteDuplicates@Join[
 			Flatten@{k},
-			First/@Flatten@OFReferencedObjects@OFStrings[k]
+			OFKey/@Flatten@OFReferencedObjects@OFStrings[k]
 			]},
-		With[{a=Association[#->First[#]&/@totalRefs]},
+		With[{a=Association[#->OFKey[#]&/@totalRefs]},
 			OFMutate[Values@a,ReplaceAll[a]]
 			]
 		]
@@ -650,7 +979,7 @@ OFHold/:
 OFHold~SetAttributes~HoldFirst
 
 
-OFRestoreExpression[k:objectPattern]:=
+OFCachingExpression[k:objectPattern]:=
 	Replace[{OFStrings[k],OFRestoreObjects[k],OFRestoreMethods[k]},{
 		{id_,Hold[CompoundExpression[o__]],Hold[CompoundExpression[m__]]}:>
 			OFHold[
@@ -665,8 +994,8 @@ OFRestoreExpression[k:objectPattern]:=
 		}]
 
 
-OFRestoreExpression[Optional[All,All]]:=
-	OFRestoreExpression[Keys@OFSelect[]]
+OFCachingExpression[Optional[All,All]]:=
+	OFCachingExpression[Keys@OFSelect[]]
 
 
 OFExport[OFHold[code_CompoundExpression,__],
@@ -689,31 +1018,29 @@ OFCloudExport[
 	CloudPut[Unevaluated[code],cloudStuf];
 
 
+OFExportString[k:objectPattern]:=
+	StringTrim[#,"(* Created with the Wolfram Language : www.wolfram.com *)\n"]&@
+		ExportString[
+			Replace[OFCachingExpression[k],
+				OFHold[code_CompoundExpression,__]:>Unevaluated[code]
+				],
+			"Text"
+			]
+
+
 OFExport[
 	k:objectPattern,
 	f_String?(FileExistsQ@*DirectoryName)]:=
 	If[DirectoryQ@f,
-		OFExport[First@OFRestoreExpression[#],
+		OFExport[
+			First@OFCachingExpression[#],
 			FileNameJoin@{f,#<>".m"}
 			]&/@OFStrings[k],
 		OFExport[
-			OFRestoreExpression[k],
-			f]
+			OFCachingExpression[k],
+			f
+			]
 		]
-
-
-OFExportString[k:objectPattern]:=
-	OFExport[k,
-		FileNameJoin@{
-			$TemporaryDirectory,
-			RandomSample[Alphabet[],15]<>".m"
-			}
-		]//With[{t=Import[#,"Text"]},DeleteFile@#;t]&//
-			StringTrim[#,"(* Created with the Wolfram Language : www.wolfram.com *)\n"]&
-
-
-OFExportExpression[k:objectPattern]:=
-	OFRestoreExpression[k];
 
 
 $OFState:=
@@ -845,25 +1172,41 @@ $deferIcon=
 
 Format[OFObject[id_String?(KeyMemberQ[$OFObjectTable["Objects"],#]&)]/;
 	TrueQ@$OFAutoFormat]:=
-	With[{repr=OFLookup[id,"ObjectRepresentation"]},
-		If[repr===Missing["KeyAbsent","ObjectRepresentation"],
-			RawBoxes@
-				BoxForm`ArrangeSummaryBox[
-					"OFObject",
-					OFObject[id],
-					$objIcon,
-					{
-						BoxForm`MakeSummaryItem[{"Type: ",OFLookup[id,"ObjectType"]},StandardForm]
-						},
-					KeyValueMap[
-						BoxForm`MakeSummaryItem[{Row@{#,": "},
-							#2/.OFObject[s_]:>s},StandardForm]&,
-						KeySelect[$OFObjectTable["Objects",id],
-							MatchQ@Except[_String?(StringMatchQ["Object*"])]]
+	With[{repr=OFLookup[id,"ObjectRepresentation",$OFNoRepr]},
+		With[{formatted=repr[OFObject[id]]},
+			If[!FreeQ[formatted,OFObject[id]],
+				RawBoxes@
+					BoxForm`ArrangeSummaryBox[
+						"OFObject",
+						OFObject[id],
+						$objIcon,
+						{
+							BoxForm`MakeSummaryItem[{
+								"Type: ",
+								OFLookup[id,"ObjectType","Object"]
+								},
+								StandardForm]
+							},
+						KeyValueMap[
+							BoxForm`MakeSummaryItem[
+								{
+									Row@{#,": "},
+									#2/.OFObject[s_]:>s
+									},
+								StandardForm
+								]&,
+							KeySelect[
+								$OFObjectTable["Objects",id],
+								MatchQ@Except[_String?(StringMatchQ["Object*"])]
+								]
+							],
+						StandardForm
 						],
-					StandardForm
-					],
-			Interpretation[repr[OFObject[id]],OFObject[id]]
+				Interpretation[
+					formatted,
+					OFObject[id]
+					]
+				]
 			]
 		];
 
@@ -922,14 +1265,13 @@ Format[OFHold[e_,info:_Association:<||>]/;
 			];
 
 
-Clear@OFObjectQ;
-OFObjectQ[_OFObject]:=True;
-OFObjectQ[s_Symbol]:=
-	MatchQ[OwnValues[s],{Verbatim[HoldPattern][HoldPattern[s]]:>_OFObject}];
-OFObjectQ[HoldPattern@Part[_MessageName,_]]:=True;
-OFObjectQ[(_MessageName)[]]:=True;
-OFObjectQ[_]:=False;
-OFObjectQ~SetAttributes~HoldFirst;
+Clear@OFTestObjectQ;
+OFTestObjectQ[s_Symbol]:=
+	MatchQ[OwnValues[s],{Verbatim[HoldPattern][HoldPattern[s]]:>_OFObject?(OFObjectQ)}];
+OFTestObjectQ[HoldPattern@Part[_MessageName,_]]:=True;
+OFTestObjectQ[(_MessageName)[]]:=True;
+OFTestObjectQ[_]:=False;
+OFTestObjectQ~SetAttributes~HoldFirst;
 
 
 OFSetMessageNameLookup[]:=
@@ -937,7 +1279,7 @@ OFSetMessageNameLookup[]:=
 		Unprotect@MessageName;
 		MessageName[s_,props:Except["usage"]..]/;
 				!TrueQ@$messageNameOverride:=
-			If[OFObjectQ@s,
+			If[OFTestObjectQ@s,
 				Fold[OFLookup[#,#2]&,s,{props}],
 				Block[{$messageNameOverride=True},MessageName[s,props]]
 				];
@@ -953,7 +1295,7 @@ OFMessageNameOverload[function_[pat___],overload_[args___],else_[elargs___]]:=
 				function[MessageName[s_,props:Except["usage"]..],pat]/;
 					!TrueQ@$messageNameOverride
 				]:=
-				If[OFObjectQ@s,
+				If[OFTestObjectQ@s,
 					With[{obj=Fold[OFLookup[#,#2]&,s,Most@{props}]},
 						overload[obj,Last@{props},args]
 						],
@@ -986,7 +1328,7 @@ OFCallPatternOverload[
 				function[MessageName[s_,props:Except["usage"]..][callargs],pat]/;
 					!TrueQ@$messageNameOverride
 				]:=
-				If[OFObjectQ@s,
+				If[OFTestObjectQ@s,
 					With[{obj=Fold[OFLookup[#,#2]&,s,Most@{props}]},
 						overload[obj,Last@{props},args]
 						],
@@ -1015,7 +1357,7 @@ OFIndexPatternOverload[indsPat___,function_[pat___],
 				function[Part[MessageName[s_,props:Except["usage"]..],indsPat],pat]/;
 					!TrueQ@$messageNameOverride
 				]:=
-				If[OFObjectQ@s,
+				If[OFTestObjectQ@s,
 					With[{obj=Fold[OFLookup[#,#2]&,s,Most@{props}]},
 						overload[obj,Last@{props},args]
 						],
@@ -1044,6 +1386,101 @@ OFSetMessageNameOverloading[]:=
 		)
 
 
+Language`SetMutationHandler[OFObject, OFObjectMutationHandler];
+
+
+OFObjectMutationHandler~SetAttributes~HoldAllComplete;
+
+
+OFObject::noobj="`` isn't a valid object"
+
+
+OFObjectMutationHandler[
+	Set[t:sym_Symbol?OFTestObjectQ[base___,prop:Except[_List]], newvalue_]
+	]:=
+	With[{obj=If[Length[Hold[base]]>0,sym[base],sym]},
+		If[OFObjectQ[obj],
+			OFSet[obj,prop,newvalue],
+			Message[OFObject::noobj,obj];
+			$Failed
+			]
+		];
+OFObjectMutationHandler[
+	SetDelayed[sym_Symbol?OFTestObjectQ[base___,prop:Except[_List]], newvalue_]
+	]:=
+	With[{obj=If[Length[Hold[base]]>0,sym[base],sym]},
+		If[OFObjectQ[obj],
+			OFSet[obj,prop,newvalue],
+			Message[OFObject::noobj,obj];
+			$Failed
+			]
+		];
+OFObjectMutationHandler[
+	Set[t:sym_Symbol?OFTestObjectQ[base___,prop:Except[_List]], newvalue_]
+	]:=
+	With[{obj=If[Length[Hold[base]]>0,sym[base],sym]},
+		If[OFObjectQ[obj],
+			OFSet[obj,prop,newvalue],
+			Message[OFObject::noobj,obj];
+			$Failed
+			]
+		];
+
+
+OFObjectMutationHandler[
+	Set[sym_Symbol?OFTestObjectQ[[base___,prop:Except[_List|_Integer],parts__Integer]],
+		newvalue_
+		]
+	]:=
+	With[{obj=If[Length[Hold[base]]>0,sym[base],sym]},
+		If[OFObjectQ[obj],
+			OFSetPart[obj,prop,parts,newvalue],
+			Message[OFObject::noobj,obj];
+			$Failed
+			]
+		];
+
+
+OFObjectMutationHandler[
+	SetDelayed[sym_Symbol?OFTestObjectQ[[
+		base___,
+		prop:Except[_List|_Integer],
+		parts__Integer
+		]],
+		newvalue_
+		]
+	]:=
+	With[{obj=If[Length[Hold[base]]>0,sym[base],sym]},
+		If[OFObjectQ[obj],
+			OFSetPartDelayed[obj,prop,parts,newvalue],
+			Message[OFObject::noobj,obj];
+			$Failed
+			]
+		];
+
+
+OFObjectMutationHandler[
+	Set[sym_Symbol?OFTestObjectQ[base___,prop_List], newvalue_]
+	]:=
+	With[{obj=If[Length[Hold[base]]>0,sym[base],sym]},
+		If[OFObjectQ[obj],
+			OFSetThread[obj,prop,newvalue],
+			Message[OFObject::noobj,obj];
+			$Failed
+			]
+		];
+OFObjectMutationHandler[
+	SetDelayed[sym_Symbol?OFTestObjectQ[base___,prop_List], newvalue_]
+	]:=
+	With[{obj=If[Length[Hold[base]]>0,sym[base],sym]},
+		If[OFObjectQ[obj],
+			OFSet[obj,prop,newvalue],
+			Message[OFObject::noobj,obj];
+			$Failed
+			]
+		];
+
+
 If[!MatchQ[$OFConstructorStack,_List],
 	$OFConstructorStack={}
 	];
@@ -1063,7 +1500,7 @@ OFBegin[name:Except[_Rule|_RuleDelayed],ops:OptionsPattern[]]:=
 	AppendTo[$OFConstructorStack,
 		<|
 			"Name"->
-				Replace[name,None|Automatic:>CreateUUID[]],
+				Replace[name,None|Automatic:>CreateUUID["Type-"]],
 			"Construct"->
 				Replace[OptionValue["Construct"],Except["Object"]->"Type"],
 			"Assign"->
@@ -1174,7 +1611,7 @@ OFEnd[]:=
 					If[t=="Type",
 						OFNewType[n,Join[f,m]];
 						OFType[n],
-						OFNew[Join[f,m,<|"ObjectType"->n|>]]
+						OFNewObject[Join[f,m,<|"ObjectType"->n|>]]
 						]
 					},
 					If[s=!=None,s=obj,s]
@@ -1219,12 +1656,21 @@ OFField/:
 OFInit/:
 	HoldPattern[(s:Set|SetDelayed)[OFInit[p___],code_]]:=
 		s[OFMethod["ObjectInitialization"][p],code];
+OFInit/:
+	HoldPattern[(s:SetOptions|SetAttributes)[OFInit,vals_]]:=
+		s[OFMethod["ObjectInitialization"],vals];
 OFRepr/:
 	HoldPattern[(s:Set|SetDelayed)[OFRepr[p___],code_]]:=
 		s[OFMethod["ObjectRepresentation"][p],code];
+OFRepr/:
+	HoldPattern[(s:SetOptions|SetAttributes)[OFRepr,vals_]]:=
+		s[OFMethod["ObjectRepresentation"],vals];
 OFStr/:
 	HoldPattern[(s:Set|SetDelayed)[OFStr[p___],code_]]:=
 		s[OFMethod["ObjectString"][p],code];
+OFStr/:
+	HoldPattern[(s:SetOptions|SetAttributes)[OFStr,vals_]]:=
+		s[OFMethod["ObjectString"],vals];
 
 
 OFMethodOptions[m:_Symbol|_Sting]:=
