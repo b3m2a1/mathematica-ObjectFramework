@@ -48,7 +48,7 @@ Unprotect["`Private`Package`*"];
 Begin["`Private`Package`"];
 
 
-(* ::Subsection::Closed:: *)
+(* ::Subsection:: *)
 (*Constants*)
 
 
@@ -58,9 +58,14 @@ $PackageName=
 	"ObjectFramework";
 $PackageListing=<||>;
 $PackageContexts={
-	"ObjectFramework`",
-	$Context
-	};
+		"ObjectFramework`",
+		"ObjectFramework`Private`Package`",
+		"ObjectFramework`Private`Hidden`"
+		};
+$PackageDeclared=
+	TrueQ[$PackageDeclared];
+$PackageFEHiddenSymbols={};
+$PackageScopedSymbols={};
 (* ::Subsection:: *)
 (*Paths*)
 
@@ -130,7 +135,7 @@ If[Not@ListQ@$LoadedPackages,
 
 
 PackageFileContextPath[f_String?DirectoryQ]:=
-	FileNameSplit[FileNameDrop[f],FileNameDepth[$PackageDirectory]+1];
+	FileNameSplit[FileNameDrop[f,FileNameDepth[$PackageDirectory]+1]];
 PackageFileContextPath[f_String?FileExistsQ]:=
 	PackageFileContextPath[DirectoryName@f];
 
@@ -139,6 +144,8 @@ PackageFileContext[f_String?DirectoryQ]:=
 	With[{s=PackageFileContextPath[f]},
 		StringRiffle[Append[""]@Prepend[s,ObjectFramework],"`"]
 		];
+PackageFileContext[f_String?FileExistsQ]:=
+	PackageFileContext[DirectoryName[f]];
 
 
 (* ::Subsubsection::Closed:: *)
@@ -150,7 +157,11 @@ PackageExecute[expr_]:=
 		BeginPackage["ObjectFramework`"];
 		$ContextPath=
 			DeleteDuplicates[Join[$ContextPath,$PackageContexts]];
-		(EndPackage[];#)&@CheckAbort[expr,EndPackage[]]
+		(EndPackage[];#)&@
+			CheckAbort[
+				expr,
+				EndPackage[]
+				]
 		);
 PackageExecute~SetAttributes~HoldFirst
 
@@ -159,30 +170,62 @@ PackageExecute~SetAttributes~HoldFirst
 (*PackagePullDeclarations*)
 
 
+PackagePullDeclarationsAction//Clear
+PackagePullDeclarationsAction[
+	Hold[
+		_Begin|_BeginPackage|
+			CompoundExpression[_Begin|_BeginPackage,___]
+		]
+	]:=
+	Throw[Begin];
+PackagePullDeclarationsAction[
+	p:
+		Hold[
+			_PackageFEHiddenBlock|_PackageScopeBlock|
+			CompoundExpression[
+				_PackageFEHiddenBlock|_PackageScopeBlock,
+				___]
+			]
+	]:=
+	(
+		ReleaseHold[p];
+		Sow[p];
+		);
+PackagePullDeclarationsAction[e:Except[Hold[Expression]]]:=
+	Sow@e;
+
+
 PackagePullDeclarations[pkgFile_]:=
-	With[{f=OpenRead[pkgFile]},
-		pkgFile->
+	pkgFile->
 		Cases[
-			Reap[
-				Do[
-					Replace[ReadList[f,Hold[Expression],1],{
-						{}->Return[EndOfFile],
-						{Hold[_Begin|_BeginPackage|
-							CompoundExpression[_Begin|_BeginPackage,___]]}:>
-							Return[Begin],
-						{e_}:>Sow[e]
-						}],
-					Infinity];
-				Close@f;
+				Reap[
+					With[{f=OpenRead[pkgFile]},
+						Catch@
+							Do[
+								If[
+									Length[
+										ReadList[
+											f,
+											PackagePullDeclarationsAction@Hold[Expression],
+											1
+											]
+										]===0,
+										Throw[EndOfFile]
+									],
+								Infinity
+								];
+						Close[f]
+						]
 				][[2,1]],
 			s_Symbol?(
-				Function[sym,
-					Quiet[StringContainsQ[Context[sym],"ObjectFramework`"]],
-					HoldFirst]):>
-				HoldPattern[s],
+				Function[Null,
+					Quiet[Context[#]===$Context],
+					HoldAllComplete
+					]
+					):>
+					HoldPattern[s],
 			Infinity
 			]
-	];
 
 
 (* ::Subsubsection::Closed:: *)
@@ -190,23 +233,34 @@ PackagePullDeclarations[pkgFile_]:=
 
 
 PackageLoadPackage[heldSym_,context_,pkgFile_->syms_]:=
-	Block[{$loadingChain=
-		If[ListQ@$loadingChain,$loadingChain,{}]
+	Block[{
+		$loadingChain=
+			If[ListQ@$loadingChain,$loadingChain,{}],
+		$inLoad=TrueQ[$inLoad]
 		},
 		If[!MemberQ[$loadingChain,pkgFile],
-			Replace[Thread[syms,HoldPattern],
-				Verbatim[HoldPattern][{s__}]:>Clear[s]
-				];
-			If[Not@MemberQ[$ContextPath,context],
-				$ContextPath=Prepend[$ContextPath,context];
-				FrontEnd`Private`GetUpdatedSymbolContexts[]
-				];
-			PackageAppGet[context,pkgFile];
-			Unprotect[$LoadedPackages];
-			AppendTo[$LoadedPackages,pkgFile];
-			Protect[$LoadedPackages];
-			ReleaseHold[heldSym]
-			]	
+			With[{$$inLoad=$inLoad},
+				$inLoad=True;
+				Internal`SymbolList[False];
+				Replace[Thread[syms,HoldPattern],
+					Verbatim[HoldPattern][{s__}]:>Clear[s]
+					];
+				If[Not@MemberQ[$ContextPath,context],
+					$ContextPath=Prepend[$ContextPath,context];
+					(*FrontEnd`Private`GetUpdatedSymbolContexts[]*)
+					];
+				Block[{PackageFEHiddenBlock=Null},
+					PackageAppGet[context,pkgFile];
+					];
+				Unprotect[$LoadedPackages];
+				AppendTo[$LoadedPackages,pkgFile];
+				Protect[$LoadedPackages];
+				If[!$$inLoad,
+					Internal`SymbolList[True]
+					];
+				ReleaseHold[heldSym]
+				]
+			]
 		];
 
 
@@ -220,7 +274,7 @@ PackageDeclarePackage[pkgFile_->syms_]:=
 		$PackageFileContexts[pkgFile]=c;
 		Map[
 			If[True,
-				#:=PackageFEHiddenBlock[PackageLoadPackage[#,c,pkgFile->syms]]
+				#:=PackageLoadPackage[#,c,pkgFile->syms]
 				]&,
 			syms
 			]
@@ -233,17 +287,9 @@ PackageDeclarePackage[pkgFile_->syms_]:=
 
 PackageLoadDeclare[pkgFile_String]:=
 	If[!MemberQ[$LoadedPackages,pkgFile],
-		PackageFEHiddenBlock[
-			If[!KeyMemberQ[$DeclaredPackages,pkgFile],
-				PackageDeclarePackage@PackagePullDeclarations[pkgFile](*,
-				Replace[$DeclaredPackages[pkgFile],
-					syms:{__}:>
-						PackageLoadPackage[None,
-							$PackageFileContexts[pkgFile],
-							pkgFile->syms
-							]
-					]*)
-				]
+		If[!KeyMemberQ[$DeclaredPackages,pkgFile],
+			PackageDeclarePackage@
+					PackagePullDeclarations[pkgFile]
 			],
 		PackageAppGet[pkgFile]
 		];
@@ -269,6 +315,7 @@ PackageAppLoad[dir_String?DirectoryQ]:=
 PackageAppLoad[file_String?FileExistsQ]:=
 	PackageLoadDeclare[file];
 PackageAppLoad[]:=
+	PackageExecute@
 	PackageAppLoad[
 		$PackageListing[$PackageName]=
 			Select[
@@ -285,22 +332,18 @@ PackageAppLoad~SetAttributes~Listable;
 
 PackageAppGet[f_]:=
 	PackageExecute[
-		PackageFEHiddenBlock[
-			If[FileExistsQ@f,
-				Get@f,
-				Get@PackageFilePath["Packages",f<>".m"]
-				]
+		If[FileExistsQ@f,
+			Get@f,
+			Get@PackageFilePath["Packages",f<>".m"]
 			]
 		];
 PackageAppGet[c_,f_]:=
 	PackageExecute[
 		Begin[c];
 		(End[];#)&@
-			PackageFEHiddenBlock[
-				If[FileExistsQ@f,
-					Get@f,
-					Get@PackageFilePath["Packages",f<>".m"]
-					]
+			If[FileExistsQ@f,
+				Get@f,
+				Get@PackageFilePath["Packages",f<>".m"]
 				]
 		];
 
@@ -322,6 +365,96 @@ PackageAppNeeds[pkg_String]:=
 	If[FileExistsQ@PackageFilePath["Packages",pkg<>".m"],
 		PackageAppNeeds[PackageFilePath["Packages",pkg<>".m"]],
 		$Failed
+		];
+
+
+(* ::Subsubsection::Closed:: *)
+(*PackageScopeBlock*)
+
+
+$PackageScopeBlockEvalExpr=TrueQ[$PackageScopeBlockEvalExpr];
+PackageScopeBlock[e_,scope_String:"Hidden"]:=
+	With[{newcont="ObjectFramework`Private`"<>StringTrim[scope,"`"]<>"`"},
+		If[!MemberQ[$PackageContexts,newcont],AppendTo[$PackageContexts,newcont]];
+		Replace[
+			Thread[
+				Cases[
+					HoldComplete[e],
+					sym_Symbol?(
+						Function[Null,
+							MemberQ[$PackageContexts,Quiet[Context[#]]],
+							HoldAllComplete
+							]
+						):>
+						HoldComplete[sym],
+					\[Infinity]
+					],
+				HoldComplete
+				],
+			HoldComplete[{s__}]:>
+				If[!$PackageDeclared&&ListQ@$PackageScopedSymbols,
+					$PackageScopedSymbols=
+						{
+							$PackageScopedSymbols,
+							newcont->
+								HoldComplete[s]
+							},
+					PackageFERehideSymbols[s];
+					Map[
+						Function[Null,
+							Quiet[
+								Check[
+									Set[Context[#],newcont],
+									Remove[#],
+									Context::cxdup
+									],
+								Context::cxdup
+								],
+							HoldAllComplete
+							],
+						HoldComplete[s]
+						]//ReleaseHold;
+					]
+			];
+		If[$PackageScopeBlockEvalExpr,e]
+		];
+PackageScopeBlock~SetAttributes~HoldAllComplete;
+
+
+(* ::Subsubsection::Closed:: *)
+(*PackageDecontext*)
+
+
+PackageDecontext[
+	pkgFile_String?(KeyMemberQ[$DeclaredPackages,#]&),
+	scope_String:"Hidden"
+	]:=
+	With[{
+		names=$DeclaredPackages[pkgFile],
+		ctx="ObjectFramework`Private`"<>StringTrim[scope,"`"]<>"`"
+		},
+		Replace[names,
+			Verbatim[HoldPattern][s_]:>
+				Set[Context[s],ctx],
+			1
+			]
+		];
+
+
+(* ::Subsubsection::Closed:: *)
+(*PackageRecontext*)
+
+
+PackageRecontext[pkgFile_String?(KeyMemberQ[$DeclaredPackages,#]&)]:=
+	With[{
+		names=$DeclaredPackages[pkgFile],
+		ctx=PackageFileContext[pkgFile]
+		},
+		Replace[names,
+			Verbatim[HoldPattern][s_]:>
+				Set[Context[s],ctx],
+			1
+			]
 		];
 (* ::Subsection:: *)
 (*Autocompletion*)
@@ -675,11 +808,61 @@ PackageFEInstallPalettes[]:=
 (*PackageFEHiddenBlock*)
 
 
-PackageFEHiddenBlock[expr_]:=
-	(
-		Internal`SymbolList[False];
-		(Internal`SymbolList[True];#)&@expr
-		);
+$PackageFEHideExprSymbols=TrueQ[$PackageFEHideExprSymbols];
+$PackageFEHideEvalExpr=TrueQ[$PackageFEHideEvalExpr];
+PackageFEHiddenBlock[expr_,
+	hide:True|False|Automatic:Automatic,
+	eval:True|False|Automatic:Automatic
+	]:=
+	If[!$PackageDeclared&&ListQ@$PackageFEHiddenSymbols,
+		With[{
+			s=
+				Cases[
+					HoldComplete[expr],
+					sym_Symbol?(
+						Function[Null,
+							MemberQ[$PackageContexts,Quiet[Context[#]]],
+							HoldAllComplete
+							]
+						):>
+						HoldPattern[sym],
+					\[Infinity]
+					]
+			},
+			$PackageFEHiddenSymbols=
+				{
+					$PackageFEHiddenSymbols,
+					s
+					}
+			],
+		Block[{feBlockReturn},
+			Internal`SymbolList[False];
+			feBlockReturn=If[Replace[eval,Automatic:>$PackageFEHideEvalExpr],expr];
+			If[Replace[hide,Automatic:>$PackageFEHideExprSymbols],
+				With[{
+					s=
+						Cases[
+							HoldComplete[expr],
+							sym_Symbol?(
+								Function[Null,
+									MemberQ[$PackageContexts,Quiet[Context[#]]],
+									HoldAllComplete
+									]
+								):>
+								HoldPattern[sym],
+							\[Infinity]
+							]
+					},
+					Replace[Thread[s,HoldPattern],
+						Verbatim[HoldPattern][{sym__}]:>
+							PackageFERehideSymbols[sym]
+						]
+					]
+				];
+			Internal`SymbolList[True];
+			feBlockReturn
+			]
+		];
 PackageFEHiddenBlock~SetAttributes~HoldFirst
 
 
@@ -903,7 +1086,190 @@ PackageLocalImport[name_,e___]:=
 		];
 
 
-(* ::Subsection::Closed:: *)
+(* ::Subsection:: *)
+(*Post-Processing*)
+
+
+(* ::Subsubsection::Closed:: *)
+(*PrepFileName*)
+
+
+PackagePostProcessFileNamePrep[fn_]:=
+		Replace[
+			FileNameSplit@
+				FileNameDrop[fn,
+					FileNameDepth@
+						PackageFilePath["Packages"]
+					],{
+			{f_}:>
+				f|fn|StringTrim[f,".m"|".wl"],
+			{p__,f_}:>
+				FileNameJoin@{p,f}|fn|{p,StringTrim[f,".m"|".wl"]}
+			}]
+
+
+(* ::Subsubsection::Closed:: *)
+(*PrepSpecs*)
+
+
+PackagePostProcessPrepSpecs[]:=
+	(
+		Unprotect[
+			$PackagePreloadedPackages,
+			$PackageHiddenPackages,
+			$PackageHiddenContexts,
+			$PackageDecontextedPackages
+			];
+		If[FileExistsQ@PackageFilePath["Config","LoadInfo.m"],
+			Replace[
+				Quiet[
+					Import@PackageFilePath["Config","LoadInfo.m"],
+					Import::nffil
+					],
+				specs:{__Rule}|_Association:>
+					CompoundExpression[
+						$PackagePreloadedPackages=
+							Replace[
+								Lookup[specs,"PreLoad"],
+								Except[{__String}]->{}
+								],
+						$PackageHiddenPackages=
+							Replace[
+								Lookup[specs,"FEHidden"],
+								Except[{__String}]->{}
+								],
+						$PackageDecontextedPackages=
+							Replace[
+								Lookup[specs,"PackageScope"],
+								Except[{__String}]->{}
+								]
+						]
+				]
+			]
+		);
+
+
+(* ::Subsubsection::Closed:: *)
+(*ExposePackages*)
+
+
+PackagePostProcessExposePackages[]:=
+	(
+		PackageAppGet/@
+			$PackagePreloadedPackages;
+		With[{
+			syms=
+				If[
+					!MemberQ[$PackageHiddenPackages,
+						PackagePostProcessFileNamePrep[#]
+						],
+					$DeclaredPackages[#],
+					{}
+					]&/@Keys@$DeclaredPackages//Flatten
+			},
+			Replace[
+				Thread[
+					If[ListQ@$PackageFEHiddenSymbols,
+						DeleteCases[syms,
+							Alternatives@@
+								(Verbatim[HoldPattern]/@Flatten@$PackageFEHiddenSymbols)
+							],
+						syms
+						],
+					HoldPattern],
+				Verbatim[HoldPattern][{s__}]:>
+					PackageFEUnhideSymbols[s]
+				]
+			]
+		)
+
+
+(* ::Subsubsection::Closed:: *)
+(*Rehide Packages*)
+
+
+PackagePostProcessRehidePackages[]:=
+	If[
+		MemberQ[$PackageHiddenPackages,
+			PackagePostProcessFileNamePrep[#]
+			],
+		PackageFERehidePackage@#
+		]&/@Keys@$DeclaredPackages
+
+
+(* ::Subsubsection::Closed:: *)
+(*Decontext*)
+
+
+PackagePostProcessDecontextPackages[]:=
+	(
+		If[
+			MemberQ[$PackageDecontextedPackages,
+				PackagePostProcessFileNamePrep[#]
+				],
+			PackageFERehidePackage@#;
+			PackageDecontext@#
+			]&/@Keys@$DeclaredPackages;
+		If[ListQ@$PackageScopedSymbols,
+			KeyValueMap[
+				With[{newcont=#},
+					Replace[Join@@#2,
+						HoldComplete[s__]:>
+							(
+								PackageFERehideSymbols[s];
+								Map[
+									Function[Null,
+										Quiet[
+											Check[
+												Set[Context[#],newcont],
+												Remove[#],
+												Context::cxdup
+												],
+											Context::cxdup
+											],
+										HoldAllComplete
+										],
+									HoldComplete[s]
+									]//ReleaseHold;
+								)
+						]
+					]&,
+				GroupBy[Flatten@$PackageScopedSymbols,First->Last]
+				];
+			]
+		)
+
+
+(* ::Subsubsection::Closed:: *)
+(*ContextPathReassign*)
+
+
+PackagePostProcessContextPathReassign[]:=
+(
+	$ContextPath=
+		Join[
+			DeleteCases[
+				Alternatives@@
+					Join[
+						Replace[
+							Flatten@{$HiddenContexts},
+							Except[_String?(StringEndsQ["`"])]->Nothing,
+							1
+							],
+						$ContextPath
+						]
+					]@
+					Select[
+						$PackageContexts,
+						Not@*StringContainsQ["Private"]
+						],
+			$ContextPath
+			];
+	FrontEnd`Private`GetUpdatedSymbolContexts[];
+	)
+
+
+(* ::Subsection:: *)
 (* End[] *)
 
 
@@ -914,131 +1280,52 @@ End[];
 (* Load *)
 
 
-(* ::Subsubsection::Closed:: *)
+Internal`SymbolList[False];
+
+
+(* ::Subsubsection:: *)
 (*Basic Load*)
 
 
 `Private`Package`$loadAbort=False;
 CheckAbort[
-	`Private`Package`PackageFEHiddenBlock[
-		`Private`Package`PackageAppLoad[]
-		],
+	`Private`Package`PackageAppLoad[];
+	`Private`Package`$PackageFEHideExprSymbols=True;
+	`Private`Package`$PackageFEHideEvalExpr=True;
+	`Private`Package`$PackageScopeBlockEvalExpr=True;
+	`Private`Package`$PackageDeclared=True;,
 	`Private`Package`$loadAbort=True;
-	EndPackage[]
+	EndPackage[];
 	];
 Protect["`Private`Package`*"];
 Unprotect[`Private`Package`$loadAbort];
 
 
-(* ::Subsubsection::Closed:: *)
-(*Exposed Packages*)
+(* ::Subsubsection:: *)
+(*Post-Process*)
 
 
-Unprotect[
-	`Private`Package`$PackagePreloadedPackages,
-	`Private`Package`$PackageHiddenPackages,
-	`Private`Package`$PackageHiddenContexts
-	];
-If[(Clear@`Private`Package`$loadAbort;!#)&@`Private`Package`$loadAbort,
-	If[$Notebooks,
-		If[FileExistsQ@`Private`Package`PackageFilePath["LoadInfo.m"],
-			Replace[
-				Quiet[
-					Import@`Private`Package`PackageFilePath["LoadInfo.m"],
-					Import::nffil
-					],
-				`Private`Package`specs:{__Rule}|_Association:>
-					CompoundExpression[
-						`Private`Package`$PackagePreloadedPackages=
-							Replace[
-								Lookup[`Private`Package`specs,"PreLoad"],
-								Except[{__String}]->{}
-								],
-						`Private`Package`$PackageHiddenPackages=
-							Replace[
-								Lookup[`Private`Package`specs,"Hidden"],
-								Except[{__String}]->{}
-								],
-						`Private`Package`$PackageHiddenContexts=
-							Replace[
-								Lookup[`Private`Package`specs,"PreLoad"],
-								Except[{__String}]->{}
-								],
-						`Private`Package`PackageAppGet/@
-							`Private`Package`$PackagePreloadedPackages;
-						If[
-							!MemberQ[`Private`Package`$PackageHiddenPackages,
-								Replace[
-									FileNameSplit@
-										FileNameDrop[#,
-											FileNameDepth@
-												`Private`Package`PackageFilePath["Packages"]
-											],{
-									{`Private`Package`f_}:>{
-										StringTrim[`Private`Package`f,".m"|".wl"]}|
-										StringTrim[`Private`Package`f,".m"|".wl"],
-									{`Private`Package`p__,`Private`Package`f_}:>
-										{`Private`Package`p,
-											StringTrim[`Private`Package`f,".m"|".wl"]}
-									}]
-								],
-							`Private`Package`PackageFEUnhidePackage@#
-							]&/@Keys@`Private`Package`$DeclaredPackages
-						]
-				],
-			`Private`Package`PackageFEUnhidePackage/@
-				Keys@`Private`Package`$DeclaredPackages
-			];
-		];
-	EndPackage[];
-	];
+If[!`Private`Package`$loadAbort,
+	`Private`Package`PackagePostProcessPrepSpecs[];
+	`Private`Package`PackagePostProcessExposePackages[];
+	`Private`Package`PackagePostProcessRehidePackages[];
+	`Private`Package`PackagePostProcessDecontextPackages[];
+	]
 
 
-(* ::Subsubsection::Closed:: *)
-(*Rehide Packages*)
+Unprotect[`Private`Package`$PackageFEHiddenSymbols];
+Clear[`Private`Package`$PackageFEHiddenSymbols];
+Unprotect[`Private`Package`$PackageScopedSymbols];
+Clear[`Private`Package`$PackageScopedSymbols];
 
 
-If[
-MemberQ[ObjectFramework`Private`Package`$PackageHiddenPackages,
-		Replace[
-			FileNameSplit@
-				FileNameDrop[#,
-					FileNameDepth@
-						ObjectFramework`Private`Package`PackageFilePath["Packages"]
-					],{
-			{ObjectFramework`Private`Package`f_}:>{
-				StringTrim[ObjectFramework`Private`Package`f,".m"|".wl"]}|
-				StringTrim[ObjectFramework`Private`Package`f,".m"|".wl"],
-			{ObjectFramework`Private`Package`p__,ObjectFramework`Private`Package`f_}:>
-				{ObjectFramework`Private`Package`p,
-					StringTrim[ObjectFramework`Private`Package`f,".m"|".wl"]}
-			}]
-		],
-	ObjectFramework`Private`Package`PackageFERehidePackage@#
-	]&/@Keys@ObjectFramework`Private`Package`$DeclaredPackages
+(* ::Subsubsection:: *)
+(*EndPackage / Reset $ContextPath*)
 
 
-(* ::Subsubsection::Closed:: *)
-(*Exposed Contexts*)
+EndPackage[];
 
 
-$ContextPath=
-	Join[
-		DeleteCases[
-			Alternatives@@
-				Join[
-					Replace[
-						Flatten@{ObjectFramework`Private`Package`$HiddenContexts},
-						Except[_String?(StringEndsQ["`"])]->Nothing,
-						1
-						],
-					$ContextPath
-					]
-				]@
-				Select[
-					ObjectFramework`Private`Package`$PackageContexts,
-					Not@*StringContainsQ["Private"]
-					],
-		$ContextPath
-		];
-FrontEnd`Private`GetUpdatedSymbolContexts[];
+If[(Clear@ObjectFramework`Private`Package`$loadAbort;!#)&@ObjectFramework`Private`Package`$loadAbort,
+	ObjectFramework`Private`Package`PackagePostProcessContextPathReassign[]
+	]
